@@ -1,0 +1,32 @@
+name: Refresh PR 77402
+on:
+  push:
+    branches:
+      - agent/pr-77402-resolution-20260811
+permissions:
+  contents: write
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply feature commit onto current upstream main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin agent/pr-77402-refresh-20260812 agent/feat-cron-occurrence-env
+          git checkout -B agent/pr-77402-refresh-20260812 origin/agent/pr-77402-refresh-20260812
+          if git cherry-pick 104fb3506fa56aa835c94a71dec9a7d8594a3726; then
+            git push origin HEAD:agent/pr-77402-refresh-20260812
+            echo "CHERRY_PICK_OK"
+          else
+            echo "CHERRY_PICK_CONFLICT"
+            git status --short
+            git diff --cc -- cron/scheduler.py tests/cron/test_cron_script.py || true
+            grep -n -B20 -A40 '^<<<<<<<\|^=======\|^>>>>>>>' cron/scheduler.py || true
+            exit 1
+          fi
