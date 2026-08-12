@@ -3,6 +3,9 @@ on:
   push:
     branches:
       - agent/pr-77402-resolution-20260811
+concurrency:
+  group: refresh-pr-77402
+  cancel-in-progress: true
 permissions:
   contents: write
 jobs:
