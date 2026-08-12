@@ -15,22 +15,77 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-      - name: Apply feature commit onto current upstream main
+      - name: Rebuild feature on current upstream main
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch --depth=1 origin agent/pr-77402-refresh-20260812:refs/remotes/origin/agent/pr-77402-refresh-20260812
-          git fetch --depth=1 origin agent/feat-cron-occurrence-env:refs/remotes/origin/agent/feat-cron-occurrence-env
           git checkout -B agent/pr-77402-refresh-20260812 origin/agent/pr-77402-refresh-20260812
-          if git cherry-pick 104fb3506fa56aa835c94a71dec9a7d8594a3726; then
-            git push origin HEAD:agent/pr-77402-refresh-20260812
-            echo "CHERRY_PICK_OK"
-          else
-            echo "CHERRY_PICK_CONFLICT"
-            git status --short
-            git diff --cc -- cron/scheduler.py tests/cron/test_cron_script.py || true
-            grep -n -B20 -A40 '^<<<<<<<\|^=======\|^>>>>>>>' cron/scheduler.py || true
-            exit 1
-          fi
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path("cron/scheduler.py")
+          s = p.read_text()
+
+          def replace_once(old: str, new: str, label: str) -> None:
+              global s
+              count = s.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, got {count}")
+              s = s.replace(old, new, 1)
+
+          replace_once(
+              """def _run_job_script(\n    script_path: str,\n    workdir: Optional[str] = None,\n) -> tuple[bool, str]:""",
+              """def _run_job_script(\n    script_path: str,\n    workdir: Optional[str] = None,\n    job_env: Optional[dict[str, str]] = None,\n) -> tuple[bool, str]:""",
+              "_run_job_script signature",
+          )
+          replace_once(
+              """        env = build_subprocess_env()\n        env.update(env_overlay)\n        # Use the job's workdir""",
+              """        env = build_subprocess_env()\n        env.update(env_overlay)\n        if job_env:\n            env.update(job_env)\n        # Use the job's workdir""",
+              "job env overlay",
+          )
+          replace_once(
+              """def _run_job_script_with_claim_heartbeat(\n    job: dict, script_path: str, workdir: Optional[str] = None,\n) -> tuple[bool, str]:""",
+              """def _run_job_script_with_claim_heartbeat(\n    job: dict,\n    script_path: str,\n    workdir: Optional[str] = None,\n    job_env: Optional[dict[str, str]] = None,\n) -> tuple[bool, str]:""",
+              "heartbeat signature",
+          )
+
+          start = s.index("def _run_job_script_with_claim_heartbeat(")
+          end = s.index("\ndef _parse_wake_gate", start)
+          chunk = s[start:end]
+          old_call = "return _run_job_script(script_path, workdir=workdir)"
+          count = chunk.count(old_call)
+          if count != 3:
+              raise SystemExit(f"heartbeat forwarding: expected 3 calls, got {count}")
+          chunk = chunk.replace(
+              old_call,
+              "return _run_job_script(script_path, workdir=workdir, job_env=job_env)",
+          )
+          s = s[:start] + chunk + s[end:]
+
+          replace_once(
+              """            ok, output = _run_job_script_with_claim_heartbeat(\n                job, script_path, workdir=_job_workdir,\n            )""",
+              """            ok, output = _run_job_script_with_claim_heartbeat(\n                job,\n                script_path,\n                workdir=_job_workdir,\n                job_env={\n                    \"HERMES_CRON_JOB_ID\": str(job_id),\n                    \"HERMES_CRON_OCCURRENCE_AT\": str(job.get(\"next_run_at\") or \"\"),\n                },\n            )""",
+              "no_agent invocation",
+          )
+          p.write_text(s)
+
+          t = Path("tests/cron/test_cron_script.py")
+          x = t.read_text()
+          if "def test_script_receives_explicit_job_environment" in x:
+              raise SystemExit("test already present unexpectedly")
+          marker = """    @pytest.mark.windows_only\n    def test_windows_uv_venv_python_script_bypasses_launcher"""
+          insertion = """    def test_script_receives_explicit_job_environment(self, cron_env):\n        from cron.scheduler import _run_job_script\n\n        script = cron_env / \"scripts\" / \"occurrence.py\"\n        script.write_text(\n            \"import os\\n\"\n            \"print(os.environ['HERMES_CRON_JOB_ID'])\\n\"\n            \"print(os.environ['HERMES_CRON_OCCURRENCE_AT'])\\n\"\n        )\n\n        success, output = _run_job_script(\n            \"occurrence.py\",\n            job_env={\n                \"HERMES_CRON_JOB_ID\": \"job-123\",\n                \"HERMES_CRON_OCCURRENCE_AT\": \"2026-08-03T10:15:00+00:00\",\n            },\n        )\n\n        assert success is True\n        assert output.splitlines() == [\n            \"job-123\",\n            \"2026-08-03T10:15:00+00:00\",\n        ]\n\n    @pytest.mark.windows_only\n    def test_windows_uv_venv_python_script_bypasses_launcher"""
+          if x.count(marker) != 1:
+              raise SystemExit(f"test insertion marker count={x.count(marker)}")
+          x = x.replace(marker, insertion, 1)
+          t.write_text(x)
+          PY
+          python -m py_compile cron/scheduler.py tests/cron/test_cron_script.py
+          git diff --check
+          git diff --stat
+          git add cron/scheduler.py tests/cron/test_cron_script.py
+          git commit -m "feat(cron): expose scheduled occurrence to scripts"
+          git push --force origin HEAD:agent/pr-77402-refresh-20260812
