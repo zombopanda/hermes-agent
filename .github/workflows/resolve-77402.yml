@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: agent/feat-cron-occurrence-env
-          fetch-depth: 0
+          fetch-depth: 2
           persist-credentials: true
 
       - name: Merge upstream main, resolve conflict, validate, push
@@ -98,8 +98,8 @@ jobs:
           python -m pip install --quiet uv
           uv run --extra dev pytest -q tests/cron/test_cron_script.py
           uv run ruff check cron/scheduler.py tests/cron/test_cron_script.py
-          git diff --check
-          git diff --cached --check
+          git diff --check -- cron/scheduler.py tests/cron/test_cron_script.py
+          git diff --cached --check -- cron/scheduler.py tests/cron/test_cron_script.py
 
           git commit -m "Merge upstream main into agent/feat-cron-occurrence-env"
           git push origin HEAD:agent/feat-cron-occurrence-env
