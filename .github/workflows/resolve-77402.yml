@@ -19,7 +19,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Merge upstream main and resolve cron conflict
+      - name: Merge upstream main, resolve conflict, validate, push
         shell: bash
         run: |
           set -euo pipefail
@@ -37,143 +37,69 @@ jobs:
             conflicts="$(git diff --name-only --diff-filter=U)"
             echo "Conflicts:"
             printf '%s\n' "$conflicts"
-
-            unexpected="$(printf '%s\n' "$conflicts" | grep -v -E '^(cron/scheduler.py|tests/cron/test_cron_script.py)$' || true)"
-            if [ -n "$unexpected" ]; then
-              echo "Unexpected conflicts; refusing to guess:"
-              printf '%s\n' "$unexpected"
-              exit 1
-            fi
-
-            while IFS= read -r file; do
-              [ -n "$file" ] || continue
-              git checkout --theirs -- "$file"
-            done <<< "$conflicts"
+            test "$conflicts" = "cron/scheduler.py"
+            git checkout --theirs -- cron/scheduler.py
 
             python - <<'PY'
           from pathlib import Path
 
-          scheduler = Path("cron/scheduler.py")
-          text = scheduler.read_text()
+          path = Path("cron/scheduler.py")
+          text = path.read_text()
 
-          old = '''def _run_job_script(
-              script_path: str,
-              workdir: Optional[str] = None,
-              cancel_event: Optional[_CancelEventLike] = None,
-          ) -> tuple[bool, str]:'''
-          new = '''def _run_job_script(
-              script_path: str,
-              workdir: Optional[str] = None,
-              job_env: Optional[dict[str, str]] = None,
-              cancel_event: Optional[_CancelEventLike] = None,
-          ) -> tuple[bool, str]:'''
-          assert old in text, "_run_job_script signature changed upstream"
-          text = text.replace(old, new, 1)
+          def replace_once(old: str, new: str, label: str) -> None:
+              global text
+              if old not in text:
+                  raise SystemExit(f"expected upstream shape missing: {label}")
+              text = text.replace(old, new, 1)
 
-          old = '''        env = build_subprocess_env()
-                  env.update(env_overlay)
-          '''
-          new = '''        env = build_subprocess_env()
-                  env.update(env_overlay)
-                  if job_env:
-                      env.update(job_env)
-          '''
-          assert old in text, "subprocess env block changed upstream"
-          text = text.replace(old, new, 1)
+          replace_once(
+              """def _run_job_script(\n    script_path: str,\n    workdir: Optional[str] = None,\n    cancel_event: Optional[_CancelEventLike] = None,\n) -> tuple[bool, str]:""",
+              """def _run_job_script(\n    script_path: str,\n    workdir: Optional[str] = None,\n    job_env: Optional[dict[str, str]] = None,\n    cancel_event: Optional[_CancelEventLike] = None,\n) -> tuple[bool, str]:""",
+              "_run_job_script signature",
+          )
+          replace_once(
+              """        env = build_subprocess_env()\n        env.update(env_overlay)\n""",
+              """        env = build_subprocess_env()\n        env.update(env_overlay)\n        if job_env:\n            env.update(job_env)\n""",
+              "script subprocess env",
+          )
+          replace_once(
+              """def _run_job_script_with_claim_heartbeat(\n    job: dict,\n    script_path: str,\n    workdir: Optional[str] = None,\n    cancel_event: Optional[_CancelEventLike] = None,\n) -> tuple[bool, str]:""",
+              """def _run_job_script_with_claim_heartbeat(\n    job: dict,\n    script_path: str,\n    workdir: Optional[str] = None,\n    job_env: Optional[dict[str, str]] = None,\n    cancel_event: Optional[_CancelEventLike] = None,\n) -> tuple[bool, str]:""",
+              "heartbeat signature",
+          )
 
-          old = '''def _run_job_script_with_claim_heartbeat(
-              job: dict,
-              script_path: str,
-              workdir: Optional[str] = None,
-              cancel_event: Optional[_CancelEventLike] = None,
-          ) -> tuple[bool, str]:'''
-          new = '''def _run_job_script_with_claim_heartbeat(
-              job: dict,
-              script_path: str,
-              workdir: Optional[str] = None,
-              job_env: Optional[dict[str, str]] = None,
-              cancel_event: Optional[_CancelEventLike] = None,
-          ) -> tuple[bool, str]:'''
-          assert old in text, "heartbeat signature changed upstream"
-          text = text.replace(old, new, 1)
-
+          old_call = "return _run_job_script(script_path, workdir=workdir, cancel_event=cancel_event)"
+          count = text.count(old_call)
+          if count < 3:
+              raise SystemExit(f"expected >=3 heartbeat script calls, found {count}")
           text = text.replace(
-              "return _run_job_script(script_path, workdir=workdir, cancel_event=cancel_event)",
+              old_call,
               "return _run_job_script(script_path, workdir=workdir, job_env=job_env, cancel_event=cancel_event)",
           )
-          assert text.count("job_env=job_env, cancel_event=cancel_event") >= 3, "heartbeat propagation incomplete"
 
-          old = '''            ok, output = _run_job_script_with_claim_heartbeat(
-                          job, script_path, workdir=_job_workdir, cancel_event=cancel_event,
-                      )'''
-          new = '''            ok, output = _run_job_script_with_claim_heartbeat(
-                          job,
-                          script_path,
-                          workdir=_job_workdir,
-                          job_env={
-                              "HERMES_CRON_JOB_ID": str(job_id),
-                              "HERMES_CRON_OCCURRENCE_AT": str(job.get("next_run_at") or ""),
-                          },
-                          cancel_event=cancel_event,
-                      )'''
-          assert old in text, "no_agent script call changed upstream"
-          text = text.replace(old, new, 1)
-          scheduler.write_text(text)
+          replace_once(
+              """            ok, output = _run_job_script_with_claim_heartbeat(\n                job, script_path, workdir=_job_workdir, cancel_event=cancel_event,\n            )""",
+              """            ok, output = _run_job_script_with_claim_heartbeat(\n                job,\n                script_path,\n                workdir=_job_workdir,\n                job_env={\n                    \"HERMES_CRON_JOB_ID\": str(job_id),\n                    \"HERMES_CRON_OCCURRENCE_AT\": str(job.get(\"next_run_at\") or \"\"),\n                },\n                cancel_event=cancel_event,\n            )""",
+              "no_agent occurrence env call",
+          )
 
-          tests = Path("tests/cron/test_cron_script.py")
-          test_text = tests.read_text()
-          if "def test_script_receives_explicit_job_environment" not in test_text:
-              anchor = '''    @pytest.mark.windows_only
-              def test_windows_uv_venv_python_script_bypasses_launcher'''
-              assert anchor in test_text, "test insertion anchor changed upstream"
-              addition = '''    def test_script_receives_explicit_job_environment(self, cron_env):
-                  from cron.scheduler import _run_job_script
-
-                  script = cron_env / "scripts" / "occurrence.py"
-                  script.write_text(
-                      "import os\\n"
-                      "print(os.environ['HERMES_CRON_JOB_ID'])\\n"
-                      "print(os.environ['HERMES_CRON_OCCURRENCE_AT'])\\n"
-                  )
-
-                  success, output = _run_job_script(
-                      "occurrence.py",
-                      job_env={
-                          "HERMES_CRON_JOB_ID": "job-123",
-                          "HERMES_CRON_OCCURRENCE_AT": "2026-08-03T10:15:00+00:00",
-                      },
-                  )
-
-                  assert success is True
-                  assert output.splitlines() == [
-                      "job-123",
-                      "2026-08-03T10:15:00+00:00",
-                  ]
-
-              @pytest.mark.windows_only
-              def test_windows_uv_venv_python_script_bypasses_launcher'''
-              test_text = test_text.replace(anchor, addition, 1)
-              tests.write_text(test_text)
+          path.write_text(text)
           PY
+            git add cron/scheduler.py
+          fi
 
-            git add cron/scheduler.py tests/cron/test_cron_script.py
-            if git diff --name-only --diff-filter=U | grep -q .; then
-              echo "Unresolved conflicts remain"
-              git diff --name-only --diff-filter=U
-              exit 1
-            fi
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo "Unresolved conflicts remain"
+            git diff --name-only --diff-filter=U
+            exit 1
           fi
 
           python -m py_compile cron/scheduler.py
+          python -m pip install --quiet uv
           uv run --extra dev pytest -q tests/cron/test_cron_script.py
           uv run ruff check cron/scheduler.py tests/cron/test_cron_script.py
           git diff --check
+          git diff --cached --check
 
-          if git diff --cached --quiet && git diff --quiet; then
-            echo "Nothing to commit"
-          else
-            git add cron/scheduler.py tests/cron/test_cron_script.py
-          fi
-
-          git commit -m "merge main into feat-cron-occurrence-env"
+          git commit -m "Merge upstream main into agent/feat-cron-occurrence-env"
           git push origin HEAD:agent/feat-cron-occurrence-env
