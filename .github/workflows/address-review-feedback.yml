@@ -1,0 +1,191 @@
+name: Address open PR review feedback
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/address-review-feedback.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Install uv
+        run: python -m pip install --quiet uv
+
+      - name: Fix PR 83921 A2A review feedback
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --depth=1 origin codex/a2a-preserve-streamed-final
+          git checkout -B fix-83921 FETCH_HEAD
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/plugins/test_a2a_plugin.py")
+          text = path.read_text()
+          old = '''            consumer.on_delta("event_id: evt_178645280")
+                      await asyncio.sleep(0.01)
+                      consumer.on_delta("9212_97bccc7032364276")
+                      consumer.finish()
+                      await runner
+          '''
+          new = '''            consumer.on_delta("event_id: evt_178645280")
+                      await asyncio.sleep(0.01)
+
+                      # A2A deliberately reports the invisible preview as an
+                      # unsuccessful delivery. GatewayStreamConsumer must treat
+                      # that as an internal streaming downgrade, not as a terminal
+                      # A2A error: the request/reply waiter stays pending and later
+                      # deltas continue accumulating for the notify-marked final.
+                      assert consumer._edit_supported is False
+                      assert consumer.already_sent is False
+                      assert consumer.final_response_sent is False
+                      assert fut.done() is False
+
+                      consumer.on_delta("9212_97bccc7032364276")
+                      await asyncio.sleep(0.01)
+                      assert fut.done() is False
+
+                      consumer.finish()
+                      await runner
+          '''
+          if old not in text:
+              raise SystemExit("83921 test anchor changed")
+          path.write_text(text.replace(old, new, 1))
+
+          adapter = Path("plugins/platforms/a2a/adapter.py")
+          atext = adapter.read_text()
+          old = '''            # preview, that loses the start of the reply.  Report the delivery
+                      # truthfully so the consumer retains the full accumulated buffer
+                      # for the notify-marked terminal send.
+          '''
+          new = '''            # preview, that loses the start of the reply.  Report the delivery
+                      # truthfully so the consumer retains the full accumulated buffer
+                      # for the notify-marked terminal send. Runtime A2A request/reply
+                      # completion uses notify-marked sends; this non-notify path is the
+                      # gateway stream-preview path and must not resolve the A2A waiter.
+          '''
+          if old not in atext:
+              raise SystemExit("83921 adapter anchor changed")
+          adapter.write_text(atext.replace(old, new, 1))
+          PY
+
+          uv run --extra dev pytest -q tests/plugins/test_a2a_plugin.py tests/plugins/test_a2a_phase23.py
+          uv run ruff check plugins/platforms/a2a/adapter.py tests/plugins/test_a2a_plugin.py
+          git diff --check
+          git add plugins/platforms/a2a/adapter.py tests/plugins/test_a2a_plugin.py
+          git commit -m "test(a2a): prove deferred previews stay internal"
+          git push origin HEAD:codex/a2a-preserve-streamed-final
+
+      - name: Fix PR 77401 Langfuse review feedback
+        shell: bash
+        run: |
+          set -euo pipefail
+          git reset --hard
+          git clean -fd
+          git fetch --depth=1 origin agent/fix-langfuse-secret-redaction
+          git checkout -B fix-77401 FETCH_HEAD
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/plugins/test_langfuse_redaction_contract.py")
+          text = path.read_text()
+          text = text.replace(
+              '''import importlib
+          import sys
+          
+          
+          def _fresh_plugin():
+              sys.modules.pop("plugins.observability.langfuse", None)
+              return importlib.import_module("plugins.observability.langfuse")
+          ''',
+              '''from plugins.observability import langfuse as mod
+          ''',
+              1,
+          )
+          text = text.replace('    mod = _fresh_plugin()\n\n', '', 3)
+          text = text.replace(
+              '''    # Truncating first would leave too few token characters for the redactor
+              # to recognize and would export this raw credential prefix.
+              assert secret[:8] not in result
+          ''',
+              '''    # Truncating first would leave too few token characters for the redactor
+              # to recognize and would export this raw credential prefix. Assert the
+              # redactor's masking marker too so an empty/dropped payload cannot pass.
+              assert result
+              assert "..." in result
+              assert secret[:8] not in result
+          ''',
+              1,
+          )
+          text = text.replace(
+              '''    assert result.startswith(secret[:8])
+              assert "truncated" in result
+          ''',
+              '''    assert result.startswith(secret[:8])
+              assert secret not in result
+              assert "truncated" in result
+          ''',
+              1,
+          )
+          if "_fresh_plugin" in text or "import importlib" in text or "import sys" in text:
+              raise SystemExit("77401 stale re-import helper remains")
+          path.write_text(text)
+          PY
+
+          uv run --extra dev pytest -q tests/plugins/test_langfuse_redaction_contract.py tests/plugins/test_langfuse_plugin.py
+          uv run ruff check tests/plugins/test_langfuse_redaction_contract.py
+          git diff --check
+          git add tests/plugins/test_langfuse_redaction_contract.py
+          git commit -m "test(langfuse): strengthen capture contract assertions"
+          git push origin HEAD:agent/fix-langfuse-secret-redaction
+
+      - name: Fix PR 77402 cron documentation feedback
+        shell: bash
+        run: |
+          set -euo pipefail
+          git reset --hard
+          git clean -fd
+          git fetch --depth=1 origin agent/feat-cron-occurrence-env
+          git checkout -B fix-77402 FETCH_HEAD
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("website/docs/user-guide/features/cron.md")
+          text = path.read_text()
+          old = '''`.sh` / `.bash` files run under `bash` from `PATH` when available, otherwise `/bin/bash` (important on Windows Git Bash). Anything else runs under the current Python interpreter (`sys.executable`). Scripts must resolve inside `$HERMES_HOME/scripts/` — relative names, absolute paths, and `~`-prefixed paths are accepted when the resolved target stays in that directory; paths that escape it are rejected. Subprocess env is sanitized (`_sanitize_subprocess_env`): provider API credentials and other Hermes-managed secrets are **not** inherited by cron scripts.
+          '''
+          new = '''`.sh` / `.bash` files run under `bash` from `PATH` when available, otherwise `/bin/bash` (important on Windows Git Bash). Anything else runs under the current Python interpreter (`sys.executable`). Scripts must resolve inside `$HERMES_HOME/scripts/` — relative names, absolute paths, and `~`-prefixed paths are accepted when the resolved target stays in that directory; paths that escape it are rejected. Subprocess env is sanitized (`_sanitize_subprocess_env`): provider API credentials and other Hermes-managed secrets are **not** inherited by cron scripts.
+
+          No-agent scripts also receive two scheduler-owned environment variables:
+
+          - `HERMES_CRON_JOB_ID` — the cron job ID.
+          - `HERMES_CRON_OCCURRENCE_AT` — the scheduled occurrence timestamp captured from the due job's `next_run_at` before scheduler state advances. It is an occurrence/idempotency hint, **not** the script's wall-clock start time. Scripts must tolerate an empty value for execution paths where no scheduled occurrence is available (for example, some manual or legacy invocations).
+
+          These `HERMES_CRON_*` values are reserved scheduler metadata. The scheduler applies them after the sanitized subprocess environment and interpreter-specific environment overlay, so they win if a child-process environment source contains the same key. They are scoped to the script subprocess and do not mutate the parent Hermes environment. Agent pre-run/wake-gate scripts do not receive this no-agent occurrence overlay.
+          '''
+          if old not in text:
+              raise SystemExit("77402 docs anchor changed")
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+          uv run --extra dev pytest -q tests/cron/test_cron_script.py
+          uv run ruff check cron/scheduler.py tests/cron/test_cron_script.py
+          git diff --check -- website/docs/user-guide/features/cron.md
+          git add website/docs/user-guide/features/cron.md
+          git commit -m "docs(cron): document script occurrence environment"
+          git push origin HEAD:agent/feat-cron-occurrence-env
