@@ -1,0 +1,49 @@
+name: Rewrite accidental bot-authored commits
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/rewrite-bot-commits.yml
+
+permissions:
+  contents: write
+
+jobs:
+  rewrite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Rewrite commit identities only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "zombopanda"
+          git config user.email "1810282+zombopanda@users.noreply.github.com"
+
+          rewrite_branch() {
+            branch="$1"
+            expected="$2"
+            git fetch --depth=2 origin "$branch"
+            git checkout -B rewrite FETCH_HEAD
+            actual="$(git rev-parse HEAD)"
+            if [ "$actual" != "$expected" ]; then
+              echo "Refusing $branch: expected $expected, got $actual" >&2
+              exit 1
+            fi
+            old_tree="$(git rev-parse HEAD^{tree})"
+            GIT_COMMITTER_NAME="zombopanda" \
+            GIT_COMMITTER_EMAIL="1810282+zombopanda@users.noreply.github.com" \
+              git commit --amend --no-edit --author="zombopanda <1810282+zombopanda@users.noreply.github.com>"
+            new_tree="$(git rev-parse HEAD^{tree})"
+            test "$old_tree" = "$new_tree"
+            git push --force-with-lease="refs/heads/$branch:$expected" origin HEAD:"$branch"
+          }
+
+          rewrite_branch codex/a2a-preserve-streamed-final 3f6ff0ad05bdb231ff31e2eff649991e5dbca6f3
+          rewrite_branch agent/fix-langfuse-secret-redaction b97413009a038166eb158c95bb1199b803651bbf
+          rewrite_branch agent/feat-cron-occurrence-env 18d5e26401fd2ced986fabe96b720172deec9824
