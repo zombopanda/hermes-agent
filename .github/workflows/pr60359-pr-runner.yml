@@ -1,7 +1,7 @@
 name: PR60359 one-shot runner
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, reopened]
 
 permissions:
@@ -9,12 +9,17 @@ permissions:
 
 jobs:
   fix:
-    if: github.event.pull_request.title == 'RUN PR60359 FIXER'
+    if: >-
+      github.event.pull_request.title == 'RUN PR60359 FIXER' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'agent/channel-overrides-model-effort' &&
+      github.event.pull_request.user.login == 'zombopanda'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: zombopanda/hermes-agent
           ref: agent/channel-overrides-model-effort
           fetch-depth: 0
 
