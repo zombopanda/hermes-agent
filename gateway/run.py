@@ -2173,7 +2173,7 @@ os.environ["HERMES_QUIET"] = "1"  # gateway runs quiet: no debug output, cwd use
 from gateway.cwd_placeholder import CWD_PLACEHOLDERS, resolve_placeholder_terminal_cwd
 
 from gateway.config import (
-    ChannelOverride, Platform, GatewayConfig, PlatformConfig, _getenv, load_gateway_config)
+    Platform, GatewayConfig, PlatformConfig, _getenv, load_gateway_config)
 from gateway.session import (
     AsyncSessionStore, SessionStore, SessionSource, SessionContext, build_session_key,
     profile_from_session_key_namespace)
@@ -2909,29 +2909,8 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     return ""
 
 
-def _channel_override_lookup_keys(
-    chat_id: str, *, thread_id: Optional[str] = None, parent_id: Optional[str] = None) -> list[str]:
-    """Ordered, de-duplicated ``channel_overrides`` lookup keys (matches ``resolve_channel_prompt``:
-    exact id first, then parent — Discord threads inherit parent overrides)."""
-    return list(dict.fromkeys(str(key) for key in (chat_id, thread_id, parent_id) if key))
-
-
-def _get_channel_override(
-    config: GatewayConfig, platform: Platform, chat_id: str, *, thread_id: Optional[str] = None,
-    parent_id: Optional[str] = None) -> Optional[ChannelOverride]:
-    """Per-channel override via chat_id, then thread_id, then parent_id; None if absent."""
-    platforms = getattr(config, "platforms", None)
-    if not platforms:
-        return None
-    platform_config = platforms.get(platform)
-    if not platform_config or not platform_config.channel_overrides:
-        return None
-    overrides = platform_config.channel_overrides
-    for key in _channel_override_lookup_keys(chat_id, thread_id=thread_id, parent_id=parent_id):
-        ov = overrides.get(key)
-        if ov is not None:
-            return ov
-    return None
+# Channel-override lookup lives in its own module; callers keep importing it from ``gateway.run``.
+from gateway.run_channel_overrides import _channel_override_lookup_keys, _get_channel_override
 
 
 def _resolve_hermes_bin() -> Optional[list[str]]:
